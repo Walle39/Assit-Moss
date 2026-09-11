@@ -209,8 +209,7 @@ class AudioPipeline:
         vad_cfg = sherpa_onnx.VadModelConfig()
         vad_cfg.silero_vad.model = cfg.vad_model
         vad_cfg.silero_vad.threshold = cfg.vad_threshold
-        vad_cfg.silero_vad.min_silence_duration_ms = cfg.vad_min_silence_ms
-        vad_cfg.silero_vad.speech_pad_ms = cfg.vad_speech_pad_ms
+        vad_cfg.silero_vad.min_silence_duration = cfg.vad_min_silence_ms
         vad_cfg.sample_rate = cfg.audio_sample_rate
         vad_cfg.num_threads = cfg.llm_n_threads
         self._vad = sherpa_onnx.VoiceActivityDetector(vad_cfg)

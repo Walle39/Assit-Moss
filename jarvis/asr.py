@@ -42,25 +42,11 @@ class ASR:
             decoder=cfg.asr_decoder,
             joiner=cfg.asr_joiner,
             tokens=cfg.asr_tokens,
-            bpe_vocab=cfg.asr_bpe_vocab or None,
-            endpoint_config=sherpa_onnx.EndpointConfig(
-                rule1=sherpa_onnx.EndpointRule(
-                    must_contain_nonsilence=False,
-                    min_trailing_silence=cfg.ep_min_trailing_silence,
-                    min_utterance_length=cfg.ep_min_utterance_length,
-                ),
-                rule2=sherpa_onnx.EndpointRule(
-                    must_contain_nonsilence=True,
-                    min_trailing_silence=cfg.ep_min_trailing_silence,
-                    min_utterance_length=0.0,
-                ),
-                rule3=sherpa_onnx.EndpointRule(
-                    must_contain_nonsilence=False,
-                    min_trailing_silence=0.0,
-                    min_utterance_length=20.0,  # 单句最长 20s 强制断
-                ),
-            ),
-            enable_external_buffer=True,
+            bpe_vocab=cfg.asr_bpe_vocab or "",
+            enable_endpoint_detection=True,
+            rule1_min_trailing_silence=cfg.ep_min_trailing_silence,
+            rule2_min_trailing_silence=cfg.ep_min_trailing_silence,
+            rule3_min_utterance_length=20.0,
             num_threads=cfg.llm_n_threads,
         )
         self._stream = self._recognizer.create_stream()
