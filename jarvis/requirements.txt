@@ -1,0 +1,14 @@
+# 端到端语音助手最小骨架依赖（Python 3.10–3.12 推荐）
+#
+# 说明：
+# - llama-cpp-python：直接加载 MiniCPM5-1B 的 GGUF 权重，不依赖 Ollama。
+#   安装时按平台选预编译 wheel，见 brain.py 顶部注释。
+# - sherpa-onnx：流式 ASR + 端点检测。
+# - sounddevice / soundfile：麦克风采集与播放（需要系统装好 PortAudio）。
+# - moss-tts-nano：从其 GitHub 仓库装，不是 pypi 包。安装见 tts.py 顶部注释。
+
+sherpa-onnx>=1.10.0
+llama-cpp-python>=0.3.0
+sounddevice>=0.4.7
+soundfile>=0.12.1
+numpy>=1.24
