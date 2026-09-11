@@ -44,12 +44,30 @@ class Cfg:
     ep_min_trailing_silence: float = 0.8   # 秒；中文建议 0.6–0.9
     ep_min_utterance_length: float = 0.0   # rule1 触发：任一时刻静音达此值即断
 
-    # ---------- Barge-in（打断）----------
-    # 播放 TTS 时检测麦克风能量，超过阈值则判定用户插话。
-    # ⚠️ 需要系统 AEC 回声消除，否则会被助手自己的声音误触发。
+    # ---------- VAD：Silero（sherpa-onnx VoiceActivityDetector）----------
+    # 模型下载：https://github.com/k2-fsa/sherpa-onnx/releases（vad models）
+    # 文件：silero_vad.onnx（int8 版 ~208KB）。放 models/vad/ 下。
+    vad_model: str = "models/vad/silero_vad.onnx"
+    vad_threshold: float = 0.6          # 语音概率阈值；0.5 灵敏，0.7 保守
+    vad_min_silence_ms: int = 500       # 静音多久算一句话结束
+    vad_speech_pad_ms: int = 200        # 语音段两端各补多少 ms（防止削头）
+
+    # ---------- AEC：回声消除（可插拔后端，自动降级）----------
+    # "webrtc" → 用 webrtc-audio-processing（需 pip install，效果最好）
+    # "speex"  → 用 pyspeex 的 MDF AEC（备选）
+    # "none"   → 不做软件 AEC，靠系统级 AEC 兜底（PulseAudio module-echo-cancel
+    #            / macOS AVAudioEngine / Android AcousticEchoCanceler）
+    # 运行时若所选后端不可用，自动降级到 "none" 并告警。
+    aec_backend: str = "webrtc"
+    aec_filter_length_ms: int = 200     # 自适应滤波器长度（speex/webrtc 建议 128–200ms）
+
+    # ---------- Barge-in（打断，基于 VAD）----------
+    # SPEAKING 状态下，若 VAD 在最近 window_ms 内检出任何语音段 → 判定插话。
+    # 比 energy 阈值可靠：silero 能区分人声与噪声/残留回声。
+    # 仍建议配合 AEC；纯 VAD 无 AEC 时，残留回声可能仍误触发（视环境而定）。
     bargein_enabled: bool = True
-    bargein_energy_db: float = -35.0   # dBFS；-40 更灵敏，-30 更保守
-    bargein_min_ms: int = 120          # 持续超阈值多久才算插话
+    bargein_window_ms: int = 300        # 回看时间窗
+    bargein_min_speech_ms: int = 80     # 窗口内累计语音 ≥ 此值才触发
 
     # ---------- 角色设定 ----------
     system_prompt: str = (

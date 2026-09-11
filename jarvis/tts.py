@@ -37,17 +37,19 @@ else:
     _SD_ERR = None
 
 from config import cfg
+from audio_pipeline import AudioPipeline  # for far-end reference
 
-# 哨兵：放进队列表示“后面没有了”
+# 哨兵：放进队列表示"后面没有了"
 _DONE = object()
 
 
 class TTS:
-    def __init__(self) -> None:
+    def __init__(self, pipeline: AudioPipeline | None = None) -> None:
         if sd is None:
             raise RuntimeError(
                 f"sounddevice 初始化失败（缺 PortAudio？）：{_SD_ERR}"
             )
+        self._pipeline = pipeline  # 播放时同步喂 far-end reference
         self._queue: queue.Queue = queue.Queue()
         self._stop_flag = threading.Event()
         self._player: threading.Thread | None = None
@@ -147,13 +149,18 @@ class TTS:
                 samplerate=sr, channels=1, dtype="float32"
             )
             self._stream.start()
-            # 分块写，便于及时响应 stop()
+            # 分块写，便于及时响应 stop()。
+            # 同时把每个块喂给 AEC 当 far-end reference ——
+            # 这样 AEC 拿到的 reference 与麦克风听到的回声相位一致。
             chunk = 2048
             for i in range(0, len(audio), chunk):
                 if self._stop_flag.is_set():
                     break
                 block = audio[i : i + chunk]
                 self._stream.write(block[:, None])
+                # 同步喂 far-end（pipeline 会自动重采样到 ASR 采样率）
+                if self._pipeline is not None:
+                    self._pipeline.push_far_end(block, sr)
         except Exception as e:
             print(f"[TTS] 播放失败: {e}")
         finally:

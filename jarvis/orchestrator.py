@@ -1,12 +1,14 @@
-"""Orchestrator：把 ASR / Brain / TTS 串成一条流水线 + barge-in 协调。
+"""Orchestrator：把 AudioPipeline / ASR / Brain / TTS 串成全双工流水线 + VAD-based barge-in。
 
 状态机：
   LISTENING ──ASR端点──> THINKING ──首句就绪──> SPEAKING ──播完──> LISTENING
                          ▲                       │
-                         └──── barge-in ─────────┘  (用户插话→停TTS→停LLM→回听)
+                         └──── barge-in ─────────┘  (VAD 检出人声→停TTS→停LLM→回听)
 
-barge-in 检测：SPEAKING 期间轮询 asr.current_energy_db，
-超过阈值且持续 >= bargein_min_ms 即判定插话。
+barge-in：SPEAKING 期间，AudioPipeline 的 silero VAD 持续工作；
+orchestrator 轮询 pipeline.is_speech_recent(window, min_speech)，
+命中即判定用户插话。比 energy 阈值可靠：silero 能区分人声与噪声/残留回声。
+配合 AEC（far-end reference 来自 TTS 输出），回声被先消除，VAD 再判。
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import threading
 import time
 from enum import Enum
 
+from audio_pipeline import AudioPipeline
 from asr import ASR
 from brain import Brain
 from tts import TTS
@@ -29,12 +32,15 @@ class State(Enum):
 
 class Orchestrator:
     def __init__(self) -> None:
-        self._bargein = threading.Event()  # 由监听线程 set，brain/tts 读
+        self._bargein = threading.Event()
         self._state = State.LISTENING
         self._state_lock = threading.Lock()
 
-        # TTS：句子进来就播
-        self._tts = TTS()
+        # 统一音频管线：麦克风采集 + AEC + VAD
+        self._pipeline = AudioPipeline()
+
+        # TTS：注入 pipeline，播放时同步喂 far-end reference
+        self._tts = TTS(pipeline=self._pipeline)
 
         # Brain：每生成一句就喂给 TTS；should_stop 查打断标志
         self._brain = Brain(
@@ -42,8 +48,9 @@ class Orchestrator:
             should_stop=self._bargein.is_set,
         )
 
-        # ASR：端点出整句 → 处理
+        # ASR：从 pipeline 拿干净音频
         self._asr = ASR(
+            pipeline=self._pipeline,
             on_endpoint=self._on_endpoint,
             on_partial=self._on_partial,
         )
@@ -55,33 +62,33 @@ class Orchestrator:
     # -------------------- 生命周期 --------------------
     def start(self) -> None:
         self._running = True
+        # 先启 pipeline（采集），再启 TTS/ASR（消费）
+        self._pipeline.start()
         self._tts.start()
         self._asr.start()
         self._watcher = threading.Thread(target=self._watch_loop, daemon=True)
         self._watcher.start()
-        self._print("[Jarvis] 就绪，请说话…（Ctrl+C 退出）")
+        self._print("[Jarvis] 就绪（VAD+AEC 全双工），请说话…（Ctrl+C 退出）")
 
     def stop(self) -> None:
         self._running = False
         self._bargein.set()
         self._asr.stop()
         self._tts.shutdown()
+        self._pipeline.stop()
         if self._watcher:
             self._watcher.join(timeout=2.0)
 
     # -------------------- ASR 回调 --------------------
     def _on_partial(self, text: str) -> None:
-        # 只在听音时打印转写
         if self._get_state() == State.LISTENING:
             self._print(f"\r  你说: {text}", end="", flush=True)
 
     def _on_endpoint(self, text: str) -> None:
         self._print(f"\r  你说: {text}" + " " * 10)
-        # 清掉可能的遗留打断标志
         self._bargein.clear()
         self._set_state(State.THINKING)
 
-        # 在独立线程跑生成，主循环继续；barge-in 监视并行
         gen_thread = threading.Thread(
             target=self._generate, args=(text,), daemon=True
         )
@@ -92,7 +99,6 @@ class Orchestrator:
         try:
             self._brain.respond(text)
         finally:
-            # 生成结束（或被打断）：若没被 bar-ge-in，等 TTS 播完再回听
             if not self._bargein.is_set():
                 self._wait_speaking_done()
             self._bargein.clear()
@@ -108,14 +114,13 @@ class Orchestrator:
         self._tts.speak(seg)
 
     def _wait_speaking_done(self, timeout: float = 30.0) -> None:
-        """等 TTS 队列排空。简单轮询即可。"""
         deadline = time.time() + timeout
         while time.time() < deadline and self._running:
             if self._tts._queue.empty() and not self._bargein.is_set():
                 return
             time.sleep(0.05)
 
-    # -------------------- Barge-in 监视 --------------------
+    # -------------------- Barge-in 监视（VAD-based）--------------------
     def _watch_loop(self) -> None:
         while self._running:
             if self._get_state() == State.SPEAKING and cfg.bargein_enabled:
@@ -123,24 +128,21 @@ class Orchestrator:
             time.sleep(0.02)
 
     def _check_bargein(self) -> None:
-        energy = self._asr.current_energy_db
-        if energy < cfg.bargein_energy_db:
+        """VAD 在最近 window 内检出累计 ≥ min_speech 的语音段 → 判定插话。
+
+        比 energy 阈值可靠：silero 能区分人声与噪声/残留回声。
+        仍建议配合 AEC；纯 VAD 无 AEC 时残留回声可能误触发。
+        """
+        if not self._pipeline.is_speech_recent(
+            cfg.bargein_window_ms, cfg.bargein_min_speech_ms
+        ):
             return
-        # 持续超阈值达 min_ms 才算插话，滤掉咳嗽/背景噪声
-        held = 0.0
-        while self._running and self._get_state() == State.SPEAKING:
-            e = self._asr.current_energy_db
-            if e >= cfg.bargein_energy_db:
-                held += 0.02
-            else:
-                return  # 能量回落，不算插话
-            if held * 1000 >= cfg.bargein_min_ms:
-                self._print("[Jarvis] (打断)")
-                self._bargein.set()
-                self._tts.stop()              # 瞬时静音
-                self._brain.reset_context()   # 丢弃不完整回复
-                return
-            time.sleep(0.02)
+        # 命中：打断
+        self._print("[Jarvis] (VAD 打断)")
+        self._bargein.set()
+        self._tts.stop()              # 瞬时静音 + 清队列
+        self._pipeline.reset_aec()     # 清 far 缓冲 + 重置 AEC 自适应
+        self._brain.reset_context()
 
     # -------------------- 工具 --------------------
     def _set_state(self, s: State) -> None:
